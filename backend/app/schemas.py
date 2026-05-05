@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 
 MonitorMode = Literal["whole_page_text", "element_text", "element_visual", "bad_state"]
@@ -20,9 +21,9 @@ class MonitorCreate(BaseModel):
     url: HttpUrl
     mode: MonitorMode = "bad_state"
     selector: str | None = None
-    interval_seconds: int = Field(default=180, ge=60)
-    jitter_seconds: int = Field(default=20, ge=0)
-    render_wait_ms: int = Field(default=1500, ge=0, le=15000)
+    interval_seconds: int | None = Field(default=None, ge=60)
+    jitter_seconds: int | None = Field(default=None, ge=0)
+    render_wait_ms: int | None = Field(default=None, ge=0, le=15000)
     cooldown_seconds: int = Field(default=1800, ge=0)
     pushover_profile_id: int | None = None
     priority: int = 0
@@ -198,3 +199,34 @@ class DiffResponse(BaseModel):
     from_text: str
     to_text: str
     unified_diff: str
+
+
+class AppSettingsRead(BaseModel):
+    app_base_url: str
+    default_check_interval_seconds: int
+    default_jitter_seconds: int
+    default_render_wait_ms: int
+    max_concurrent_checks: int
+    data_dir: str
+    settings_path: str
+    settings_hash: str
+    settings_hash_valid: bool | None
+    encryption_key_status: str
+
+
+class AppSettingsUpdate(BaseModel):
+    app_base_url: str | None = Field(default=None, max_length=500)
+    default_check_interval_seconds: int | None = Field(default=None, ge=60, le=86_400)
+    default_jitter_seconds: int | None = Field(default=None, ge=0, le=3_600)
+    default_render_wait_ms: int | None = Field(default=None, ge=0, le=15_000)
+    max_concurrent_checks: int | None = Field(default=None, ge=1, le=8)
+
+    @field_validator("app_base_url")
+    @classmethod
+    def validate_app_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("App URL must be a full http:// or https:// URL.")
+        return value.rstrip("/")

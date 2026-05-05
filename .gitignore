@@ -2,7 +2,6 @@ data/
 .server.pid
 .env
 .env.*
-!.env.example
 .venv/
 backend/.venv/
 __pycache__/

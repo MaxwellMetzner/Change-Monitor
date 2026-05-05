@@ -32,6 +32,9 @@ class MonitorScheduler:
             self._stop_event.clear()
             self._task = asyncio.create_task(self._loop())
 
+    def configure(self, *, max_concurrent_checks: int) -> None:
+        self._semaphore = asyncio.Semaphore(max_concurrent_checks)
+
     async def stop(self) -> None:
         self._stop_event.set()
         if self._task is not None:

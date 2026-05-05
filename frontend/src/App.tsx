@@ -4,6 +4,7 @@ import {
   Bell,
   ChevronRight,
   CheckCircle2,
+  CircleHelp,
   ExternalLink,
   History,
   Loader2,
@@ -20,7 +21,7 @@ import {
 } from "lucide-react";
 import React, { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./lib/api";
-import type { Alert, CheckRun, Monitor, PreviewElement, PreviewLoad, PreviewSelection, PushoverProfile } from "./lib/types";
+import type { Alert, AppSettings, CheckRun, Monitor, PreviewElement, PreviewLoad, PreviewSelection, PushoverProfile } from "./lib/types";
 
 type View = "dashboard" | "new" | "settings" | "detail";
 
@@ -33,6 +34,19 @@ const statusTone: Record<string, string> = {
   paused: "bg-zinc-100 text-zinc-700 border-zinc-200",
   paused_after_alert: "bg-zinc-100 text-zinc-700 border-zinc-200",
   new: "bg-sky-50 text-sky-800 border-sky-200"
+};
+
+const defaultAppSettings: AppSettings = {
+  app_base_url: "http://localhost:8000",
+  default_check_interval_seconds: 180,
+  default_jitter_seconds: 20,
+  default_render_wait_ms: 1500,
+  max_concurrent_checks: 2,
+  data_dir: "",
+  settings_path: "",
+  settings_hash: "",
+  settings_hash_valid: null,
+  encryption_key_status: "stored in data volume"
 };
 
 function classNames(...values: Array<string | false | null | undefined>) {
@@ -54,6 +68,17 @@ function timeAgo(value: string | null) {
   if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
   return `${Math.round(diff / 86_400_000)}d ago`;
+}
+
+function durationLabel(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60} minutes`;
+  return `${seconds}s`;
+}
+
+function waitLabel(ms: number) {
+  return `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)} seconds`;
 }
 
 function elementArea(element: PreviewElement) {
@@ -92,18 +117,35 @@ function Button({
   );
 }
 
+function HelpTip({ text }: { text: string }) {
+  return (
+    <span
+      className="inline-flex h-5 w-5 items-center justify-center rounded-full text-zinc-400 hover:text-teal-700"
+      title={text}
+      aria-label={text}
+    >
+      <CircleHelp className="h-4 w-4" />
+    </span>
+  );
+}
+
 function Field({
   label,
   children,
-  hint
+  hint,
+  help
 }: {
   label: string;
   children: React.ReactNode;
   hint?: string;
+  help?: string;
 }) {
   return (
     <label className="grid gap-1.5 text-sm font-medium text-zinc-800">
-      <span>{label}</span>
+      <span className="flex items-center gap-1.5">
+        {label}
+        {help ? <HelpTip text={help} /> : null}
+      </span>
       {children}
       {hint ? <span className="text-xs font-normal text-zinc-500">{hint}</span> : null}
     </label>
@@ -307,17 +349,19 @@ function PreviewPicker({
 
 function NewMonitorWizard({
   profiles,
+  appSettings,
   onCreated,
   onCancel
 }: {
   profiles: PushoverProfile[];
+  appSettings: AppSettings;
   onCreated: (monitor: Monitor) => void;
   onCancel: () => void;
 }) {
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
-  const [interval, setIntervalValue] = useState(180);
-  const [renderWaitMs, setRenderWaitMs] = useState(1500);
+  const [interval, setIntervalValue] = useState(appSettings.default_check_interval_seconds);
+  const [renderWaitMs, setRenderWaitMs] = useState(appSettings.default_render_wait_ms);
   const [profileId, setProfileId] = useState<string>("");
   const [priority, setPriority] = useState(0);
   const [currentStateBad, setCurrentStateBad] = useState(true);
@@ -327,6 +371,14 @@ function NewMonitorWizard({
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const intervalOptions = useMemo(
+    () => Array.from(new Set([appSettings.default_check_interval_seconds, 60, 180, 900, 1800])).sort((left, right) => left - right),
+    [appSettings.default_check_interval_seconds]
+  );
+  const waitOptions = useMemo(
+    () => Array.from(new Set([appSettings.default_render_wait_ms, 1500, 3000, 5000, 8000])).sort((left, right) => left - right),
+    [appSettings.default_render_wait_ms]
+  );
 
   const suggestedName = useMemo(() => {
     if (name.trim()) return name;
@@ -391,7 +443,7 @@ function NewMonitorWizard({
         mode: selected ? (currentStateBad ? "bad_state" : "element_text") : "whole_page_text",
         selector: selected?.selector ?? null,
         interval_seconds: interval,
-        jitter_seconds: 20,
+        jitter_seconds: appSettings.default_jitter_seconds,
         render_wait_ms: renderWaitMs,
         cooldown_seconds: 1800,
         pushover_profile_id: profileId ? Number(profileId) : null,
@@ -456,10 +508,11 @@ function NewMonitorWizard({
             <div className="grid grid-cols-2 gap-3">
               <Field label="Interval">
                 <Select value={interval} onChange={(event) => setIntervalValue(Number(event.target.value))}>
-                  <option value={60}>1 minute</option>
-                  <option value={180}>3 minutes</option>
-                  <option value={900}>15 minutes</option>
-                  <option value={1800}>30 minutes</option>
+                  {intervalOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {durationLabel(value)}
+                    </option>
+                  ))}
                 </Select>
               </Field>
               <Field label="Priority">
@@ -473,10 +526,11 @@ function NewMonitorWizard({
 
             <Field label="After-load wait" hint="Use a longer wait when the page shows a temporary message before the real stock state.">
               <Select value={renderWaitMs} onChange={(event) => setRenderWaitMs(Number(event.target.value))}>
-                <option value={1500}>1.5 seconds</option>
-                <option value={3000}>3 seconds</option>
-                <option value={5000}>5 seconds</option>
-                <option value={8000}>8 seconds</option>
+                {waitOptions.map((value) => (
+                  <option key={value} value={value}>
+                    {waitLabel(value)}
+                  </option>
+                ))}
               </Select>
             </Field>
 
@@ -684,23 +738,65 @@ function MonitorDetail({
 }
 
 function SettingsView({
+  appSettings,
   profiles,
   alerts,
   onCreated,
+  onSettingsSaved,
   onTest
 }: {
+  appSettings: AppSettings;
   profiles: PushoverProfile[];
   alerts: Alert[];
   onCreated: () => void;
+  onSettingsSaved: (settings: AppSettings) => void;
   onTest: (id: number) => void;
 }) {
+  const [appBaseUrl, setAppBaseUrl] = useState(appSettings.app_base_url);
+  const [defaultInterval, setDefaultInterval] = useState(appSettings.default_check_interval_seconds);
+  const [defaultJitter, setDefaultJitter] = useState(appSettings.default_jitter_seconds);
+  const [defaultRenderWait, setDefaultRenderWait] = useState(appSettings.default_render_wait_ms);
+  const [maxConcurrent, setMaxConcurrent] = useState(appSettings.max_concurrent_checks);
   const [name, setName] = useState("");
   const [userKey, setUserKey] = useState("");
   const [appToken, setAppToken] = useState("");
   const [device, setDevice] = useState("");
   const [priority, setPriority] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  useEffect(() => {
+    setAppBaseUrl(appSettings.app_base_url);
+    setDefaultInterval(appSettings.default_check_interval_seconds);
+    setDefaultJitter(appSettings.default_jitter_seconds);
+    setDefaultRenderWait(appSettings.default_render_wait_ms);
+    setMaxConcurrent(appSettings.max_concurrent_checks);
+  }, [appSettings]);
+
+  async function saveAppSettings(event: FormEvent) {
+    event.preventDefault();
+    setSavingSettings(true);
+    setSettingsError(null);
+    setSettingsSaved(null);
+    try {
+      const nextSettings = await api.updateAppSettings({
+        app_base_url: appBaseUrl,
+        default_check_interval_seconds: defaultInterval,
+        default_jitter_seconds: defaultJitter,
+        default_render_wait_ms: defaultRenderWait,
+        max_concurrent_checks: maxConcurrent
+      });
+      onSettingsSaved(nextSettings);
+      setSettingsSaved("Settings saved");
+    } catch (exc) {
+      setSettingsError(exc instanceof Error ? exc.message : "Settings save failed");
+    } finally {
+      setSavingSettings(false);
+    }
+  }
 
   async function createProfile(event: FormEvent) {
     event.preventDefault();
@@ -728,35 +824,104 @@ function SettingsView({
   }
 
   return (
-    <div className="grid gap-5 xl:grid-cols-[420px_1fr]">
-      <section className="rounded-md border border-zinc-200 bg-white p-4 shadow-soft">
-        <h2 className="text-lg font-semibold text-zinc-950">Pushover Profile</h2>
-        <form className="mt-4 grid gap-3" onSubmit={createProfile}>
-          <Field label="Name">
-            <TextInput required value={name} onChange={(event) => setName(event.target.value)} placeholder="Personal" />
-          </Field>
-          <Field label="User key">
-            <TextInput required value={userKey} onChange={(event) => setUserKey(event.target.value)} />
-          </Field>
-          <Field label="App token">
-            <TextInput required value={appToken} onChange={(event) => setAppToken(event.target.value)} />
-          </Field>
-          <Field label="Device">
-            <TextInput value={device} onChange={(event) => setDevice(event.target.value)} placeholder="Optional" />
-          </Field>
-          <Field label="Default priority">
-            <Select value={priority} onChange={(event) => setPriority(Number(event.target.value))}>
-              <option value={0}>Normal</option>
-              <option value={1}>High</option>
-              <option value={-1}>Quiet</option>
-            </Select>
-          </Field>
-          {error ? <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</p> : null}
-          <Button type="submit" disabled={saving}>
-            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            Save profile
-          </Button>
-        </form>
+    <div className="grid gap-5 xl:grid-cols-[460px_1fr]">
+      <section className="grid content-start gap-5">
+        <div className="rounded-md border border-zinc-200 bg-white p-4 shadow-soft">
+          <h2 className="text-lg font-semibold text-zinc-950">App Settings</h2>
+          <form className="mt-4 grid gap-3" onSubmit={saveAppSettings}>
+            <Field label="Public URL" help="The external URL people use to open this app. It is saved in the data volume and is applied on the next backend restart if CORS needs it.">
+              <TextInput required type="url" value={appBaseUrl} onChange={(event) => setAppBaseUrl(event.target.value)} />
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Default interval" help="The starting check cadence for new monitors. Existing monitors keep their own interval.">
+                <TextInput
+                  required
+                  type="number"
+                  min={60}
+                  max={86400}
+                  step={60}
+                  value={defaultInterval}
+                  onChange={(event) => setDefaultInterval(Number(event.target.value))}
+                />
+              </Field>
+              <Field label="Default jitter" help="Adds a small random offset to scheduled checks so multiple monitors do not fire at the same instant.">
+                <TextInput
+                  required
+                  type="number"
+                  min={0}
+                  max={3600}
+                  step={5}
+                  value={defaultJitter}
+                  onChange={(event) => setDefaultJitter(Number(event.target.value))}
+                />
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Default wait" help="Milliseconds to wait after page load before text and screenshots are captured.">
+                <TextInput
+                  required
+                  type="number"
+                  min={0}
+                  max={15000}
+                  step={250}
+                  value={defaultRenderWait}
+                  onChange={(event) => setDefaultRenderWait(Number(event.target.value))}
+                />
+              </Field>
+              <Field label="Concurrent checks" help="Limits how many browser checks the scheduler can run at the same time.">
+                <TextInput
+                  required
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={maxConcurrent}
+                  onChange={(event) => setMaxConcurrent(Number(event.target.value))}
+                />
+              </Field>
+            </div>
+            <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600">
+              <p className="break-all">Settings file: {appSettings.settings_path}</p>
+              <p className="mt-1 break-all">Hash: {appSettings.settings_hash}</p>
+              <p className="mt-1">Encryption key: {appSettings.encryption_key_status}</p>
+            </div>
+            {settingsError ? <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{settingsError}</p> : null}
+            {settingsSaved ? <p className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{settingsSaved}</p> : null}
+            <Button type="submit" disabled={savingSettings}>
+              {savingSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              Save settings
+            </Button>
+          </form>
+        </div>
+
+        <div className="rounded-md border border-zinc-200 bg-white p-4 shadow-soft">
+          <h2 className="text-lg font-semibold text-zinc-950">Pushover Profile</h2>
+          <form className="mt-4 grid gap-3" onSubmit={createProfile}>
+            <Field label="Name">
+              <TextInput required value={name} onChange={(event) => setName(event.target.value)} placeholder="Personal" />
+            </Field>
+            <Field label="User key" help="Your Pushover user or group key. It is encrypted before being saved in the volume.">
+              <TextInput required value={userKey} onChange={(event) => setUserKey(event.target.value)} />
+            </Field>
+            <Field label="App token" help="The API token from your Pushover application. It is encrypted before being saved in the volume.">
+              <TextInput required value={appToken} onChange={(event) => setAppToken(event.target.value)} />
+            </Field>
+            <Field label="Device" help="Optional Pushover device name if alerts should go to one device only.">
+              <TextInput value={device} onChange={(event) => setDevice(event.target.value)} placeholder="Optional" />
+            </Field>
+            <Field label="Default priority" help="The Pushover priority used unless a monitor overrides it.">
+              <Select value={priority} onChange={(event) => setPriority(Number(event.target.value))}>
+                <option value={0}>Normal</option>
+                <option value={1}>High</option>
+                <option value={-1}>Quiet</option>
+              </Select>
+            </Field>
+            {error ? <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</p> : null}
+            <Button type="submit" disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              Save profile
+            </Button>
+          </form>
+        </div>
       </section>
 
       <section className="grid content-start gap-5">
@@ -809,6 +974,7 @@ export default function App() {
   const [monitors, setMonitors] = useState<Monitor[]>([]);
   const [profiles, setProfiles] = useState<PushoverProfile[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
   const [runs, setRuns] = useState<CheckRun[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -818,10 +984,16 @@ export default function App() {
   const selectedMonitor = monitors.find((monitor) => monitor.id === selectedId) ?? null;
 
   const refresh = useCallback(async () => {
-    const [nextMonitors, nextProfiles, nextAlerts] = await Promise.all([api.monitors(), api.profiles(), api.alerts()]);
+    const [nextMonitors, nextProfiles, nextAlerts, nextAppSettings] = await Promise.all([
+      api.monitors(),
+      api.profiles(),
+      api.alerts(),
+      api.appSettings()
+    ]);
     setMonitors(nextMonitors);
     setProfiles(nextProfiles);
     setAlerts(nextAlerts);
+    setAppSettings(nextAppSettings);
   }, []);
 
   const loadRuns = useCallback(async (id: number) => {
@@ -1041,6 +1213,7 @@ export default function App() {
         {!loading && view === "new" ? (
           <NewMonitorWizard
             profiles={profiles}
+            appSettings={appSettings}
             onCancel={() => setView("dashboard")}
             onCreated={async (monitor) => {
               setSelectedId(monitor.id);
@@ -1066,7 +1239,14 @@ export default function App() {
         ) : null}
 
         {!loading && view === "settings" ? (
-          <SettingsView profiles={profiles} alerts={alerts} onCreated={refresh} onTest={testProfile} />
+          <SettingsView
+            appSettings={appSettings}
+            profiles={profiles}
+            alerts={alerts}
+            onCreated={refresh}
+            onSettingsSaved={setAppSettings}
+            onTest={testProfile}
+          />
         ) : null}
       </main>
     </div>

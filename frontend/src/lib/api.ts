@@ -1,5 +1,6 @@
 import type {
   Alert,
+  AppSettings,
   CheckRun,
   Monitor,
   PreviewLoad,
@@ -36,6 +37,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  appSettings: () => request<AppSettings>("/api/app-settings"),
+  updateAppSettings: (payload: Record<string, unknown>) =>
+    request<AppSettings>("/api/app-settings", { method: "PATCH", body: JSON.stringify(payload) }),
   monitors: () => request<Monitor[]>("/api/monitors"),
   monitor: (id: number) => request<Monitor>(`/api/monitors/${id}`),
   createMonitor: (payload: Record<string, unknown>) =>
@@ -62,4 +66,3 @@ export const api = {
     }),
   alerts: () => request<Alert[]>("/api/alerts")
 };
-

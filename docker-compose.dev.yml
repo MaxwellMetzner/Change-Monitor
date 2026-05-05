@@ -6,26 +6,7 @@ services:
     image: change-monitor:dev
     container_name: change-monitor-dev
     restart: unless-stopped
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      DATA_DIR: /data
-      APP_BASE_URL: http://localhost:8080
-      TZ: America/New_York
     ports:
       - "8080:8000"
     volumes:
       - ./data:/data
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s

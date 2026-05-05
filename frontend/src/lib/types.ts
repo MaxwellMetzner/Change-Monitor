@@ -115,3 +115,16 @@ export type PushoverProfile = {
   created_at: string;
   updated_at: string;
 };
+
+export type AppSettings = {
+  app_base_url: string;
+  default_check_interval_seconds: number;
+  default_jitter_seconds: number;
+  default_render_wait_ms: number;
+  max_concurrent_checks: number;
+  data_dir: string;
+  settings_path: string;
+  settings_hash: string;
+  settings_hash_valid: boolean | null;
+  encryption_key_status: string;
+};

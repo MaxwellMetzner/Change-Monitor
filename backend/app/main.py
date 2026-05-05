@@ -13,11 +13,13 @@ from sqlalchemy.orm import Session
 
 from .browser import browser_service
 from .config import settings
-from .database import create_session, get_db, init_db
+from .database import get_db, init_db
 from .models import Alert, CheckRun, Monitor, PushoverProfile, Snapshot
 from .notifier import send_pushover
 from .schemas import (
     AlertRead,
+    AppSettingsRead,
+    AppSettingsUpdate,
     CheckRunRead,
     DiffResponse,
     MonitorCreate,
@@ -42,19 +44,6 @@ from .storage import read_text_artifact
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
-    if settings.PUSHOVER_DEFAULT_USER_KEY and settings.PUSHOVER_DEFAULT_APP_TOKEN:
-        with create_session() as db:
-            existing_profile = db.scalars(select(PushoverProfile).limit(1)).first()
-            if existing_profile is None:
-                db.add(
-                    PushoverProfile(
-                        name="Default",
-                        user_key_encrypted=encrypt_secret(settings.PUSHOVER_DEFAULT_USER_KEY),
-                        app_token_encrypted=encrypt_secret(settings.PUSHOVER_DEFAULT_APP_TOKEN),
-                        default_priority=0,
-                    )
-                )
-                db.commit()
     scheduler.start()
     try:
         yield
@@ -89,6 +78,34 @@ def container_health() -> dict[str, str]:
     return health()
 
 
+def _app_settings_response() -> AppSettingsRead:
+    runtime = settings.RUNTIME_SETTINGS
+    return AppSettingsRead(
+        app_base_url=runtime.app_base_url,
+        default_check_interval_seconds=runtime.default_check_interval_seconds,
+        default_jitter_seconds=runtime.default_jitter_seconds,
+        default_render_wait_ms=runtime.default_render_wait_ms,
+        max_concurrent_checks=runtime.max_concurrent_checks,
+        data_dir=str(settings.DATA_DIR),
+        settings_path=str(settings.runtime_store.path),
+        settings_hash=settings.runtime_store.current_hash,
+        settings_hash_valid=settings.runtime_store.last_hash_valid,
+        encryption_key_status="stored in data volume",
+    )
+
+
+@app.get("/api/app-settings", response_model=AppSettingsRead)
+def get_app_settings() -> AppSettingsRead:
+    return _app_settings_response()
+
+
+@app.patch("/api/app-settings", response_model=AppSettingsRead)
+def update_app_settings(payload: AppSettingsUpdate) -> AppSettingsRead:
+    settings.update_runtime_settings(payload.model_dump(exclude_unset=True))
+    scheduler.configure(max_concurrent_checks=settings.MAX_CONCURRENT_CHECKS)
+    return _app_settings_response()
+
+
 @app.get("/api/monitors", response_model=list[MonitorRead])
 def list_monitors(db: Db) -> list[MonitorRead]:
     monitors = db.scalars(select(Monitor).order_by(desc(Monitor.created_at))).all()
@@ -102,9 +119,9 @@ async def create_monitor(payload: MonitorCreate, db: Db) -> MonitorRead:
         url=str(payload.url),
         mode=payload.mode,
         selector=payload.selector,
-        interval_seconds=payload.interval_seconds,
-        jitter_seconds=payload.jitter_seconds,
-        render_wait_ms=payload.render_wait_ms or payload.wait_ms,
+        interval_seconds=payload.interval_seconds or settings.DEFAULT_CHECK_INTERVAL_SECONDS,
+        jitter_seconds=payload.jitter_seconds if payload.jitter_seconds is not None else settings.DEFAULT_JITTER_SECONDS,
+        render_wait_ms=payload.render_wait_ms or payload.wait_ms or settings.DEFAULT_RENDER_WAIT_MS,
         cooldown_seconds=payload.cooldown_seconds,
         pushover_profile_id=payload.pushover_profile_id,
         priority=payload.priority,

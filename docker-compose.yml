@@ -1,26 +1,9 @@
 services:
   watcher-app:
-    image: max1234565/changemonitor:0.1.0
+    image: max1234565/changemonitor:latest
     container_name: change-monitor
     restart: unless-stopped
-    environment:
-      DATA_DIR: /data
-      APP_BASE_URL: http://10.0.0.201:8085
-      TZ: America/New_York
     ports:
       - "8085:8000"
     volumes:
       - /opt/homelab/volumes/change-monitor/data:/data
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
