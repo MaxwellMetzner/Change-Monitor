@@ -111,6 +111,7 @@ export type PushoverProfile = {
   id: number;
   name: string;
   default_device: string | null;
+  devices: string[];
   default_priority: number;
   created_at: string;
   updated_at: string;

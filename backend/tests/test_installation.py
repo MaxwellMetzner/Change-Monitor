@@ -56,6 +56,19 @@ with TestClient(app) as client:
     settings_response = client.get("/api/app-settings")
     assert settings_response.status_code == 200
     assert settings_response.json()["settings_hash"].startswith("sha256:")
+    profile_response = client.post(
+        "/api/pushover-profiles",
+        json={"name": "Personal", "user_key": "user", "app_token": "token", "devices": ["phone"], "default_device": "phone"},
+    )
+    assert profile_response.status_code == 201
+    assert profile_response.json()["devices"] == ["phone"]
+    duplicate_response = client.post(
+        "/api/pushover-profiles",
+        json={"name": " personal ", "user_key": "user", "app_token": "token"},
+    )
+    assert duplicate_response.status_code == 409
+    delete_response = client.delete(f"/api/pushover-profiles/{profile_response.json()['id']}")
+    assert delete_response.status_code == 204
 
 
 async def browser_check():

@@ -61,20 +61,32 @@ function domain(url: string) {
   }
 }
 
-function timeAgo(value: string | null) {
+function parseApiDate(value: string) {
+  const hasTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(value);
+  return new Date(hasTimezone ? value : `${value}Z`);
+}
+
+function timeAgo(value: string | null, now = Date.now()) {
   if (!value) return "Never";
-  const diff = Date.now() - new Date(value).getTime();
+  const timestamp = parseApiDate(value).getTime();
+  if (Number.isNaN(timestamp)) return "Unknown";
+  const diff = Math.max(0, now - timestamp);
   if (diff < 60_000) return "Just now";
-  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
-  return `${Math.round(diff / 86_400_000)}d ago`;
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 function durationLabel(seconds: number) {
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 60) return `${seconds} seconds`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (remainder) return `${minutes}m ${remainder}s`;
   if (seconds % 3600 === 0) return `${seconds / 3600}h`;
-  if (seconds % 60 === 0) return `${seconds / 60} minutes`;
-  return `${seconds}s`;
+  return `${minutes} minutes`;
 }
 
 function waitLabel(ms: number) {
@@ -83,6 +95,34 @@ function waitLabel(ms: number) {
 
 function elementArea(element: PreviewElement) {
   return element.rect.width * element.rect.height;
+}
+
+function clamp(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function splitDevices(value: string | null) {
+  if (!value) return [];
+  const seen = new Set<string>();
+  return value
+    .split(",")
+    .map((device) => device.trim())
+    .filter((device) => {
+      if (!device || seen.has(device.toLowerCase())) return false;
+      seen.add(device.toLowerCase());
+      return true;
+    });
+}
+
+function uniqueDevices(values: string[]) {
+  const seen = new Set<string>();
+  return values.filter((device) => {
+    const key = device.trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function rectsOverlap(left: PreviewElement["rect"], right: PreviewElement["rect"]) {
@@ -173,6 +213,51 @@ function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   );
 }
 
+function DurationInputs({
+  value,
+  onChange,
+  minSeconds = 10,
+  maxSeconds = 86400
+}: {
+  value: number;
+  onChange: (seconds: number) => void;
+  minSeconds?: number;
+  maxSeconds?: number;
+}) {
+  const minutes = Math.floor(value / 60);
+  const seconds = value % 60;
+  const update = (nextMinutes: number, nextSeconds: number) => {
+    onChange(clamp(nextMinutes * 60 + nextSeconds, minSeconds, maxSeconds));
+  };
+
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      <label className="grid gap-1 text-xs font-medium text-zinc-500">
+        Minutes
+        <TextInput
+          type="number"
+          min={0}
+          max={Math.floor(maxSeconds / 60)}
+          value={minutes}
+          aria-label="Interval minutes"
+          onChange={(event) => update(Number(event.target.value || 0), seconds)}
+        />
+      </label>
+      <label className="grid gap-1 text-xs font-medium text-zinc-500">
+        Seconds
+        <TextInput
+          type="number"
+          min={0}
+          max={59}
+          value={seconds}
+          aria-label="Interval seconds"
+          onChange={(event) => update(minutes, clamp(Number(event.target.value || 0), 0, 59))}
+        />
+      </label>
+    </div>
+  );
+}
+
 function StatusChip({ status }: { status: string }) {
   return (
     <span className={classNames("inline-flex rounded-md border px-2 py-1 text-xs font-semibold capitalize", statusTone[status] ?? statusTone.new)}>
@@ -201,6 +286,7 @@ function Dashboard({
   monitors,
   alerts,
   busyId,
+  now,
   onCreate,
   onOpen,
   onRefresh,
@@ -211,6 +297,7 @@ function Dashboard({
   monitors: Monitor[];
   alerts: Alert[];
   busyId: number | null;
+  now: number;
   onCreate: () => void;
   onOpen: (id: number) => void;
   onRefresh: () => void;
@@ -250,10 +337,10 @@ function Dashboard({
                 <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-zinc-500">
                   <span>{domain(monitor.url)}</span>
                   <span>{monitor.mode.replaceAll("_", " ")}</span>
-                  <span>{Math.round(monitor.interval_seconds / 60)}m interval</span>
+                  <span>{durationLabel(monitor.interval_seconds)} interval</span>
                   <span>{(monitor.render_wait_ms / 1000).toFixed(1)}s wait</span>
-                  <span>Last check {timeAgo(monitor.last_checked_at)}</span>
-                  <span>Last alert {timeAgo(monitor.last_alerted_at)}</span>
+                  <span>Last check {timeAgo(monitor.last_checked_at, now)}</span>
+                  <span>Last alert {timeAgo(monitor.last_alerted_at, now)}</span>
                 </div>
               </button>
               <div className="flex flex-wrap gap-2">
@@ -290,7 +377,7 @@ function Dashboard({
                 <Bell className="h-4 w-4 text-teal-700" />
                 <span className="font-medium text-zinc-900">{alert.title}</span>
                 <StatusChip status={alert.status} />
-                <span className="text-zinc-500">{timeAgo(alert.created_at)}</span>
+                <span className="text-zinc-500">{timeAgo(alert.created_at, now)}</span>
               </div>
               <p className="line-clamp-2 text-zinc-600">{alert.message}</p>
             </div>
@@ -371,10 +458,6 @@ function NewMonitorWizard({
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const intervalOptions = useMemo(
-    () => Array.from(new Set([appSettings.default_check_interval_seconds, 60, 180, 900, 1800])).sort((left, right) => left - right),
-    [appSettings.default_check_interval_seconds]
-  );
   const waitOptions = useMemo(
     () => Array.from(new Set([appSettings.default_render_wait_ms, 1500, 3000, 5000, 8000])).sort((left, right) => left - right),
     [appSettings.default_render_wait_ms]
@@ -506,20 +589,14 @@ function NewMonitorWizard({
             </Field>
 
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Interval">
-                <Select value={interval} onChange={(event) => setIntervalValue(Number(event.target.value))}>
-                  {intervalOptions.map((value) => (
-                    <option key={value} value={value}>
-                      {durationLabel(value)}
-                    </option>
-                  ))}
-                </Select>
+              <Field label="Check interval" hint={durationLabel(interval)}>
+                <DurationInputs value={interval} onChange={setIntervalValue} />
               </Field>
               <Field label="Priority">
                 <Select value={priority} onChange={(event) => setPriority(Number(event.target.value))}>
-                  <option value={0}>Normal</option>
-                  <option value={1}>High</option>
-                  <option value={-1}>Quiet</option>
+                  <option value={0}>Normal alert</option>
+                  <option value={1}>High priority</option>
+                  <option value={-1}>Quiet notification</option>
                 </Select>
               </Field>
             </div>
@@ -606,25 +683,34 @@ function MonitorDetail({
   monitor,
   runs,
   busyId,
+  now,
   onBack,
   onRefresh,
   onCheck,
   onPauseResume,
   onRebaseline,
-  onUpdateWait
+  onUpdateWait,
+  onUpdateInterval
 }: {
   monitor: Monitor;
   runs: CheckRun[];
   busyId: number | null;
+  now: number;
   onBack: () => void;
   onRefresh: () => void;
   onCheck: (id: number) => void;
   onPauseResume: (monitor: Monitor) => void;
   onRebaseline: (id: number) => void;
   onUpdateWait: (id: number, renderWaitMs: number) => void;
+  onUpdateInterval: (id: number, intervalSeconds: number) => void;
 }) {
   const baselineImage = monitor.baseline?.element_screenshot_url || monitor.baseline?.screenshot_url;
   const latestImage = monitor.latest_snapshot?.element_screenshot_url || monitor.latest_snapshot?.screenshot_url;
+  const [intervalDraft, setIntervalDraft] = useState(monitor.interval_seconds);
+
+  useEffect(() => {
+    setIntervalDraft(monitor.interval_seconds);
+  }, [monitor.id, monitor.interval_seconds]);
 
   return (
     <div className="grid gap-5">
@@ -637,7 +723,7 @@ function MonitorDetail({
             </div>
             <p className="mt-1 break-all text-sm text-zinc-500">{monitor.url}</p>
             <p className="mt-1 text-sm text-zinc-500">
-              Checks wait {(monitor.render_wait_ms / 1000).toFixed(1)}s after load before capturing.
+              Checks every {durationLabel(monitor.interval_seconds)} and waits {(monitor.render_wait_ms / 1000).toFixed(1)}s after load.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -660,7 +746,20 @@ function MonitorDetail({
             </Button>
           </div>
         </div>
-        <div className="mt-4 max-w-xs">
+        <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,280px)_minmax(0,240px)]">
+          <Field label="Check interval" hint={durationLabel(intervalDraft)}>
+            <div className="grid gap-2">
+              <DurationInputs value={intervalDraft} onChange={setIntervalDraft} />
+              <Button
+                variant="secondary"
+                onClick={() => onUpdateInterval(monitor.id, intervalDraft)}
+                disabled={intervalDraft === monitor.interval_seconds}
+              >
+                <Save className="h-4 w-4" />
+                Save interval
+              </Button>
+            </div>
+          </Field>
           <Field label="After-load wait" hint="Raise this if the page shows a temporary busy/loading status before the final stock text.">
             <Select value={monitor.render_wait_ms} onChange={(event) => onUpdateWait(monitor.id, Number(event.target.value))}>
               <option value={1500}>1.5 seconds</option>
@@ -717,7 +816,7 @@ function MonitorDetail({
               <div key={run.id} className="grid gap-2 px-4 py-3 text-sm">
                 <div className="flex flex-wrap items-center gap-2">
                   <StatusChip status={run.status} />
-                  <span className="font-medium text-zinc-900">{timeAgo(run.started_at)}</span>
+                  <span className="font-medium text-zinc-900">Logged {timeAgo(run.started_at, now)}</span>
                   <span className="text-zinc-500">score {Math.round(run.change_score * 100)}%</span>
                   {run.snapshot_id ? <span className="text-zinc-500">snapshot #{run.snapshot_id}</span> : null}
                 </div>
@@ -737,10 +836,119 @@ function MonitorDetail({
   );
 }
 
+function ProfileCard({
+  profile,
+  onTest,
+  onSave,
+  onDelete,
+  onRefreshDevices
+}: {
+  profile: PushoverProfile;
+  onTest: (id: number) => void;
+  onSave: (id: number, payload: Record<string, unknown>) => void;
+  onDelete: (id: number) => void;
+  onRefreshDevices: (id: number) => void;
+}) {
+  const deviceOptions = useMemo(
+    () => uniqueDevices([...(profile.devices ?? []), ...splitDevices(profile.default_device)]),
+    [profile.default_device, profile.devices]
+  );
+  const [name, setName] = useState(profile.name);
+  const [priority, setPriority] = useState(profile.default_priority);
+  const [selectedDevices, setSelectedDevices] = useState<string[]>(splitDevices(profile.default_device));
+
+  useEffect(() => {
+    setName(profile.name);
+    setPriority(profile.default_priority);
+    setSelectedDevices(splitDevices(profile.default_device));
+  }, [profile.id, profile.name, profile.default_priority, profile.default_device]);
+
+  const selectedDeviceCsv = selectedDevices.join(",");
+  const savedDeviceCsv = splitDevices(profile.default_device).join(",");
+  const dirty = name.trim() !== profile.name || priority !== profile.default_priority || selectedDeviceCsv !== savedDeviceCsv;
+
+  function toggleDevice(device: string) {
+    setSelectedDevices((current) =>
+      current.includes(device) ? current.filter((value) => value !== device) : [...current, device]
+    );
+  }
+
+  return (
+    <div className="grid gap-3 px-4 py-4">
+      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_160px]">
+        <Field label="Profile name">
+          <TextInput value={name} onChange={(event) => setName(event.target.value)} />
+        </Field>
+        <Field label="Priority">
+          <Select value={priority} onChange={(event) => setPriority(Number(event.target.value))}>
+            <option value={0}>Normal alert</option>
+            <option value={1}>High priority</option>
+            <option value={-1}>Quiet notification</option>
+          </Select>
+        </Field>
+      </div>
+
+      <div className="grid gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-sm font-medium text-zinc-800">Devices</span>
+          <Button variant="secondary" onClick={() => onRefreshDevices(profile.id)}>
+            <RefreshCw className="h-4 w-4" />
+            Refresh devices
+          </Button>
+        </div>
+        {deviceOptions.length > 0 ? (
+          <div className="grid gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-3 md:grid-cols-2">
+            {deviceOptions.map((device) => (
+              <label key={device} className="flex items-center gap-2 text-sm text-zinc-800">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-teal-700"
+                  checked={selectedDevices.includes(device)}
+                  onChange={() => toggleDevice(device)}
+                />
+                <span>{device}</span>
+              </label>
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500">All devices</p>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <Button
+          variant="secondary"
+          onClick={() =>
+            onSave(profile.id, {
+              name,
+              default_priority: priority,
+              default_device: selectedDevices.length ? selectedDeviceCsv : null,
+              devices: deviceOptions
+            })
+          }
+          disabled={!dirty}
+        >
+          <Save className="h-4 w-4" />
+          Save
+        </Button>
+        <Button variant="secondary" onClick={() => onTest(profile.id)}>
+          <Bell className="h-4 w-4" />
+          Test
+        </Button>
+        <Button variant="danger" onClick={() => onDelete(profile.id)}>
+          <Trash2 className="h-4 w-4" />
+          Delete
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function SettingsView({
   appSettings,
   profiles,
   alerts,
+  now,
   onCreated,
   onSettingsSaved,
   onTest
@@ -748,6 +956,7 @@ function SettingsView({
   appSettings: AppSettings;
   profiles: PushoverProfile[];
   alerts: Alert[];
+  now: number;
   onCreated: () => void;
   onSettingsSaved: (settings: AppSettings) => void;
   onTest: (id: number) => void;
@@ -760,13 +969,15 @@ function SettingsView({
   const [name, setName] = useState("");
   const [userKey, setUserKey] = useState("");
   const [appToken, setAppToken] = useState("");
-  const [device, setDevice] = useState("");
+  const [availableDevices, setAvailableDevices] = useState<string[]>([]);
+  const [selectedDevices, setSelectedDevices] = useState<string[]>([]);
   const [priority, setPriority] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [loadingDevices, setLoadingDevices] = useState(false);
 
   useEffect(() => {
     setAppBaseUrl(appSettings.app_base_url);
@@ -798,6 +1009,30 @@ function SettingsView({
     }
   }
 
+  function toggleNewProfileDevice(device: string) {
+    setSelectedDevices((current) =>
+      current.includes(device) ? current.filter((value) => value !== device) : [...current, device]
+    );
+  }
+
+  async function loadDevices() {
+    setLoadingDevices(true);
+    setError(null);
+    try {
+      const result = await api.validateProfile({ user_key: userKey, app_token: appToken });
+      const devices = uniqueDevices(result.devices);
+      setAvailableDevices(devices);
+      setSelectedDevices(devices);
+      if (devices.length === 0) {
+        setError("Pushover validated, but no named devices were returned.");
+      }
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "Device lookup failed");
+    } finally {
+      setLoadingDevices(false);
+    }
+  }
+
   async function createProfile(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
@@ -807,19 +1042,52 @@ function SettingsView({
         name,
         user_key: userKey,
         app_token: appToken,
-        default_device: device || null,
+        default_device: selectedDevices.length ? selectedDevices.join(",") : null,
+        devices: availableDevices,
         default_priority: priority
       });
       setName("");
       setUserKey("");
       setAppToken("");
-      setDevice("");
+      setAvailableDevices([]);
+      setSelectedDevices([]);
       setPriority(0);
       onCreated();
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "Profile save failed");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function updateProfile(id: number, payload: Record<string, unknown>) {
+    setError(null);
+    try {
+      await api.updateProfile(id, payload);
+      await onCreated();
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "Profile update failed");
+    }
+  }
+
+  async function deleteProfile(id: number) {
+    if (!window.confirm("Delete this Pushover profile? Monitors using it will keep running without push notifications.")) return;
+    setError(null);
+    try {
+      await api.deleteProfile(id);
+      await onCreated();
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "Profile delete failed");
+    }
+  }
+
+  async function refreshProfileDevices(id: number) {
+    setError(null);
+    try {
+      await api.refreshProfileDevices(id);
+      await onCreated();
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "Device refresh failed");
     }
   }
 
@@ -905,14 +1173,34 @@ function SettingsView({
             <Field label="App token" help="The API token from your Pushover application. It is encrypted before being saved in the volume.">
               <TextInput required value={appToken} onChange={(event) => setAppToken(event.target.value)} />
             </Field>
-            <Field label="Device" help="Optional Pushover device name if alerts should go to one device only.">
-              <TextInput value={device} onChange={(event) => setDevice(event.target.value)} placeholder="Optional" />
+            <Field label="Devices" help="Pushover routes to all devices when none are selected.">
+              <div className="grid gap-2">
+                <Button type="button" variant="secondary" onClick={loadDevices} disabled={!userKey || !appToken || loadingDevices}>
+                  {loadingDevices ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  Load devices
+                </Button>
+                {availableDevices.length > 0 ? (
+                  <div className="grid gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-3">
+                    {availableDevices.map((deviceName) => (
+                      <label key={deviceName} className="flex items-center gap-2 text-sm font-normal text-zinc-800">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-teal-700"
+                          checked={selectedDevices.includes(deviceName)}
+                          onChange={() => toggleNewProfileDevice(deviceName)}
+                        />
+                        <span>{deviceName}</span>
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </Field>
-            <Field label="Default priority" help="The Pushover priority used unless a monitor overrides it.">
+            <Field label="Default priority" help="Priority changes how prominently Pushover presents the notification. Device checkboxes control where it is sent.">
               <Select value={priority} onChange={(event) => setPriority(Number(event.target.value))}>
-                <option value={0}>Normal</option>
-                <option value={1}>High</option>
-                <option value={-1}>Quiet</option>
+                <option value={0}>Normal alert</option>
+                <option value={1}>High priority</option>
+                <option value={-1}>Quiet notification</option>
               </Select>
             </Field>
             {error ? <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</p> : null}
@@ -931,16 +1219,14 @@ function SettingsView({
           </div>
           <div className="divide-y divide-zinc-200">
             {profiles.map((profile) => (
-              <div key={profile.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-                <div>
-                  <p className="font-medium text-zinc-950">{profile.name}</p>
-                  <p className="text-sm text-zinc-500">Priority {profile.default_priority}</p>
-                </div>
-                <Button variant="secondary" onClick={() => onTest(profile.id)}>
-                  <Bell className="h-4 w-4" />
-                  Test
-                </Button>
-              </div>
+              <ProfileCard
+                key={profile.id}
+                profile={profile}
+                onTest={onTest}
+                onSave={updateProfile}
+                onDelete={deleteProfile}
+                onRefreshDevices={refreshProfileDevices}
+              />
             ))}
             {profiles.length === 0 ? <p className="px-4 py-5 text-sm text-zinc-500">No Pushover profiles saved.</p> : null}
           </div>
@@ -956,7 +1242,7 @@ function SettingsView({
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium text-zinc-950">{alert.title}</span>
                   <StatusChip status={alert.status} />
-                  <span className="text-zinc-500">{timeAgo(alert.created_at)}</span>
+                  <span className="text-zinc-500">{timeAgo(alert.created_at, now)}</span>
                 </div>
                 <p className="text-zinc-600">{alert.message}</p>
               </div>
@@ -977,11 +1263,18 @@ export default function App() {
   const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
   const [runs, setRuns] = useState<CheckRun[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [monitorDetail, setMonitorDetail] = useState<Monitor | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now());
 
-  const selectedMonitor = monitors.find((monitor) => monitor.id === selectedId) ?? null;
+  const selectedMonitor =
+    view === "detail"
+      ? monitorDetail?.id === selectedId
+        ? monitorDetail
+        : null
+      : monitors.find((monitor) => monitor.id === selectedId) ?? null;
 
   const refresh = useCallback(async () => {
     const [nextMonitors, nextProfiles, nextAlerts, nextAppSettings] = await Promise.all([
@@ -1000,6 +1293,10 @@ export default function App() {
     setRuns(await api.runs(id));
   }, []);
 
+  const loadMonitorDetail = useCallback(async (id: number) => {
+    setMonitorDetail(await api.monitor(id));
+  }, []);
+
   useEffect(() => {
     refresh()
       .catch((exc) => setToast(exc instanceof Error ? exc.message : "Load failed"))
@@ -1007,15 +1304,29 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     if (selectedId) {
-      loadRuns(selectedId).catch((exc) => setToast(exc instanceof Error ? exc.message : "History load failed"));
+      Promise.all([loadRuns(selectedId), loadMonitorDetail(selectedId)]).catch((exc) =>
+        setToast(exc instanceof Error ? exc.message : "Monitor detail load failed")
+      );
     }
-  }, [selectedId, loadRuns]);
+  }, [selectedId, loadRuns, loadMonitorDetail]);
 
   async function openMonitor(id: number) {
     setSelectedId(id);
-    setView("detail");
-    await loadRuns(id);
+    setMonitorDetail(null);
+    try {
+      const [detail, nextRuns] = await Promise.all([api.monitor(id), api.runs(id)]);
+      setMonitorDetail(detail);
+      setRuns(nextRuns);
+      setView("detail");
+    } catch (exc) {
+      setToast(exc instanceof Error ? exc.message : "Monitor detail load failed");
+    }
   }
 
   async function checkNow(id: number) {
@@ -1025,6 +1336,7 @@ export default function App() {
       await api.checkNow(id);
       await refresh();
       await loadRuns(id);
+      await loadMonitorDetail(id);
     } catch (exc) {
       setToast(exc instanceof Error ? exc.message : "Check failed");
     } finally {
@@ -1037,6 +1349,7 @@ export default function App() {
       if (monitor.enabled) await api.pause(monitor.id);
       else await api.resume(monitor.id);
       await refresh();
+      if (selectedId === monitor.id) await loadMonitorDetail(monitor.id);
     } catch (exc) {
       setToast(exc instanceof Error ? exc.message : "Update failed");
     }
@@ -1048,6 +1361,7 @@ export default function App() {
       await api.deleteMonitor(id);
       if (selectedId === id) {
         setSelectedId(null);
+        setMonitorDetail(null);
         setView("dashboard");
       }
       await refresh();
@@ -1062,6 +1376,7 @@ export default function App() {
       await api.rebaseline(id);
       await refresh();
       await loadRuns(id);
+      await loadMonitorDetail(id);
     } catch (exc) {
       setToast(exc instanceof Error ? exc.message : "Rebaseline failed");
     } finally {
@@ -1071,11 +1386,23 @@ export default function App() {
 
   async function updateRenderWait(id: number, renderWaitMs: number) {
     try {
-      await api.updateMonitor(id, { render_wait_ms: renderWaitMs });
+      const detail = await api.updateMonitor(id, { render_wait_ms: renderWaitMs });
+      setMonitorDetail(detail);
       await refresh();
       setToast("After-load wait updated. Rebaseline if the old baseline captured a temporary state.");
     } catch (exc) {
       setToast(exc instanceof Error ? exc.message : "Wait update failed");
+    }
+  }
+
+  async function updateInterval(id: number, intervalSeconds: number) {
+    try {
+      const detail = await api.updateMonitor(id, { interval_seconds: intervalSeconds });
+      setMonitorDetail(detail);
+      await refresh();
+      setToast(`Check interval updated to ${durationLabel(intervalSeconds)}.`);
+    } catch (exc) {
+      setToast(exc instanceof Error ? exc.message : "Interval update failed");
     }
   }
 
@@ -1138,12 +1465,6 @@ export default function App() {
               <Settings className="h-4 w-4" />
               Settings
             </Button>
-            {profiles.length > 0 ? (
-              <Button variant="secondary" onClick={() => testProfile(profiles[0].id)}>
-                <Bell className="h-4 w-4" />
-                Test
-              </Button>
-            ) : null}
           </nav>
         </div>
         {notificationWarning ? (
@@ -1155,12 +1476,6 @@ export default function App() {
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span className="min-w-0 break-words">{notificationWarning}</span>
             </button>
-            {profiles.length > 0 ? (
-              <Button variant="secondary" onClick={() => testProfile(profiles[0].id)}>
-                <Bell className="h-4 w-4" />
-                Test Pushover
-              </Button>
-            ) : null}
           </div>
         ) : null}
       </header>
@@ -1201,6 +1516,7 @@ export default function App() {
             monitors={monitors}
             alerts={alerts}
             busyId={busyId}
+            now={now}
             onCreate={() => setView("new")}
             onOpen={openMonitor}
             onRefresh={() => refresh().catch((exc) => setToast(exc instanceof Error ? exc.message : "Refresh failed"))}
@@ -1217,8 +1533,10 @@ export default function App() {
             onCancel={() => setView("dashboard")}
             onCreated={async (monitor) => {
               setSelectedId(monitor.id);
+              setMonitorDetail(monitor);
               await refresh();
               await loadRuns(monitor.id);
+              await loadMonitorDetail(monitor.id);
               setView("detail");
             }}
           />
@@ -1229,12 +1547,18 @@ export default function App() {
             monitor={selectedMonitor}
             runs={runs}
             busyId={busyId}
+            now={now}
             onBack={() => setView("dashboard")}
-            onRefresh={() => refresh().catch((exc) => setToast(exc instanceof Error ? exc.message : "Refresh failed"))}
+            onRefresh={() =>
+              Promise.all([refresh(), loadMonitorDetail(selectedMonitor.id), loadRuns(selectedMonitor.id)]).catch((exc) =>
+                setToast(exc instanceof Error ? exc.message : "Refresh failed")
+              )
+            }
             onCheck={checkNow}
             onPauseResume={pauseResume}
             onRebaseline={rebaseline}
             onUpdateWait={updateRenderWait}
+            onUpdateInterval={updateInterval}
           />
         ) : null}
 
@@ -1243,6 +1567,7 @@ export default function App() {
             appSettings={appSettings}
             profiles={profiles}
             alerts={alerts}
+            now={now}
             onCreated={refresh}
             onSettingsSaved={setAppSettings}
             onTest={testProfile}

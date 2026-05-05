@@ -21,7 +21,7 @@ class MonitorCreate(BaseModel):
     url: HttpUrl
     mode: MonitorMode = "bad_state"
     selector: str | None = None
-    interval_seconds: int | None = Field(default=None, ge=60)
+    interval_seconds: int | None = Field(default=None, ge=10, le=86_400)
     jitter_seconds: int | None = Field(default=None, ge=0)
     render_wait_ms: int | None = Field(default=None, ge=0, le=15000)
     cooldown_seconds: int = Field(default=1800, ge=0)
@@ -40,7 +40,7 @@ class MonitorUpdate(BaseModel):
     enabled: bool | None = None
     mode: MonitorMode | None = None
     selector: str | None = None
-    interval_seconds: int | None = Field(default=None, ge=60)
+    interval_seconds: int | None = Field(default=None, ge=10, le=86_400)
     jitter_seconds: int | None = Field(default=None, ge=0)
     render_wait_ms: int | None = Field(default=None, ge=0, le=15000)
     cooldown_seconds: int | None = Field(default=None, ge=0)
@@ -176,13 +176,33 @@ class PushoverProfileCreate(BaseModel):
     user_key: str = Field(min_length=1)
     app_token: str = Field(min_length=1)
     default_device: str | None = None
+    devices: list[str] = Field(default_factory=list)
     default_priority: int = 0
+
+
+class PushoverProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    default_device: str | None = None
+    devices: list[str] | None = None
+    default_priority: int | None = None
+
+
+class PushoverProfileValidateRequest(BaseModel):
+    user_key: str = Field(min_length=1)
+    app_token: str = Field(min_length=1)
+
+
+class PushoverProfileValidateResponse(BaseModel):
+    status: str
+    devices: list[str]
+    response: str
 
 
 class PushoverProfileRead(BaseModel):
     id: int
     name: str
     default_device: str | None
+    devices: list[str]
     default_priority: int
     created_at: datetime
     updated_at: datetime

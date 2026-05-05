@@ -127,6 +127,7 @@ class PushoverProfile(Base):
     user_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     app_token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     default_device: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    device_names_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     default_priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)

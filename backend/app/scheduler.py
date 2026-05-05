@@ -65,7 +65,7 @@ class MonitorScheduler:
                     continue
                 jitter = random.randint(-monitor.jitter_seconds, monitor.jitter_seconds) if monitor.jitter_seconds else 0
                 backoff_multiplier = 4 if monitor.failure_count >= 5 else 2 if monitor.failure_count >= 3 else 1
-                due_after = timedelta(seconds=max(60, monitor.interval_seconds * backoff_multiplier + jitter))
+                due_after = timedelta(seconds=max(10, monitor.interval_seconds * backoff_multiplier + jitter))
                 if _as_utc(monitor.last_checked_at) + due_after <= now:
                     due_ids.append(monitor.id)
 

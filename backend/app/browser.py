@@ -78,7 +78,7 @@ SELECTOR_SCRIPT = """
   const elements = Array.from(document.querySelectorAll("body *"))
     .filter(isVisible)
     .map((el) => {
-      const text = (el.innerText || el.getAttribute("aria-label") || el.getAttribute("value") || "").replace(/\\s+/g, " ").trim();
+      const text = (el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("value") || "").replace(/\\s+/g, " ").trim();
       const rect = el.getBoundingClientRect();
       const tag = el.tagName;
       const visibleChildren = Array.from(el.children).filter(isVisible);
@@ -123,6 +123,24 @@ VISIBLE_TEXT_SCRIPT = """
     document.querySelectorAll(selector).forEach((el) => el.remove());
   }
   return document.body ? document.body.innerText : "";
+}
+"""
+
+ELEMENT_TEXT_SCRIPT = """
+(el) => {
+  const values = [
+    el.innerText,
+    el.textContent,
+    el.getAttribute("aria-label"),
+    el.getAttribute("title"),
+    el.getAttribute("value"),
+    el.getAttribute("alt")
+  ];
+  for (const value of values) {
+    const text = String(value || "").replace(/\\s+/g, " ").trim();
+    if (text) return text;
+  }
+  return "";
 }
 """
 
@@ -243,7 +261,7 @@ class BrowserService:
             if count == 0:
                 return {"selector": selector, "text": "", "html": "", "match_count": 0, "rect": None, "screenshot_base64": None}
             element = locator.first
-            text = (await element.inner_text(timeout=5000)).strip()
+            text = (await element.evaluate(ELEMENT_TEXT_SCRIPT)).strip()
             html = await element.evaluate("(el) => el.outerHTML")
             rect = await element.bounding_box()
             screenshot = await element.screenshot(type="png", animations="disabled")
@@ -285,7 +303,7 @@ class BrowserService:
                         await element.scroll_into_view_if_needed(timeout=5000)
                     except PlaywrightError:
                         pass
-                    selected_text = (await element.inner_text(timeout=5000)).strip()
+                    selected_text = (await element.evaluate(ELEMENT_TEXT_SCRIPT)).strip()
                     html_snippet = await element.evaluate("(el) => el.outerHTML")
                     element_bytes = await element.screenshot(type="png", animations="disabled")
                     element_screenshot_path = write_bytes_artifact("elements", target.monitor_id, element_bytes)

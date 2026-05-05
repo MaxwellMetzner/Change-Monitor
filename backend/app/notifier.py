@@ -14,6 +14,27 @@ class NotificationResult:
     response: str
 
 
+@dataclass
+class ValidationResult:
+    status: str
+    devices: list[str]
+    response: str
+
+
+async def validate_pushover_credentials(user_key: str, app_token: str) -> ValidationResult:
+    payload = {"token": app_token, "user": user_key}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post("https://api.pushover.net/1/users/validate.json", data=payload)
+        body = response.json()
+        devices = [str(device) for device in body.get("devices", []) if str(device).strip()]
+        if response.is_success and body.get("status") == 1:
+            return ValidationResult(status="valid", devices=devices, response=response.text[:2000])
+        return ValidationResult(status="invalid", devices=devices, response=response.text[:2000])
+    except (httpx.HTTPError, ValueError) as exc:
+        return ValidationResult(status="failed", devices=[], response=str(exc))
+
+
 async def send_pushover(
     profile: PushoverProfile,
     *,
@@ -48,4 +69,3 @@ async def send_pushover(
         return NotificationResult(status="failed", response=response.text[:2000])
     except httpx.HTTPError as exc:
         return NotificationResult(status="failed", response=str(exc))
-

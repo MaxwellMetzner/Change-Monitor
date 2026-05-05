@@ -15,7 +15,7 @@ from .browser import browser_service
 from .config import settings
 from .database import get_db, init_db
 from .models import Alert, CheckRun, Monitor, PushoverProfile, Snapshot
-from .notifier import send_pushover
+from .notifier import send_pushover, validate_pushover_credentials
 from .schemas import (
     AlertRead,
     AppSettingsRead,
@@ -31,14 +31,17 @@ from .schemas import (
     PreviewSelectionResponse,
     PushoverProfileCreate,
     PushoverProfileRead,
+    PushoverProfileUpdate,
+    PushoverProfileValidateRequest,
+    PushoverProfileValidateResponse,
     SnapshotRead,
     TestAlertRequest,
 )
 from .scheduler import scheduler
-from .security import encrypt_secret
+from .security import decrypt_secret, encrypt_secret
 from .serialize import serialize_alert, serialize_check_run, serialize_monitor, serialize_snapshot
 from .services import diff_snapshots, initialize_monitor, rebaseline_monitor, run_monitor_check
-from .storage import read_text_artifact
+from .storage import from_json, read_text_artifact, to_json
 
 
 @asynccontextmanager
@@ -66,6 +69,86 @@ app.mount("/api/assets", StaticFiles(directory=str(settings.DATA_DIR)), name="as
 
 
 Db = Annotated[Session, Depends(get_db)]
+
+
+def _clean_name(value: str) -> str:
+    cleaned = " ".join(value.split())
+    if not cleaned:
+        raise HTTPException(status_code=422, detail="Name cannot be blank.")
+    return cleaned
+
+
+def _normalized_name(value: str) -> str:
+    return _clean_name(value).casefold()
+
+
+def _ensure_unique_monitor_name(db: Session, name: str, *, exclude_id: int | None = None) -> None:
+    normalized = _normalized_name(name)
+    monitors = db.scalars(select(Monitor)).all()
+    for monitor in monitors:
+        if exclude_id is not None and monitor.id == exclude_id:
+            continue
+        if _normalized_name(monitor.name) == normalized:
+            raise HTTPException(status_code=409, detail="A monitor with this name already exists.")
+
+
+def _ensure_unique_profile_name(db: Session, name: str, *, exclude_id: int | None = None) -> None:
+    normalized = _normalized_name(name)
+    profiles = db.scalars(select(PushoverProfile)).all()
+    for profile in profiles:
+        if exclude_id is not None and profile.id == exclude_id:
+            continue
+        if _normalized_name(profile.name) == normalized:
+            raise HTTPException(status_code=409, detail="A Pushover profile with this name already exists.")
+
+
+def _clean_device_names(values: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        device = value.strip()
+        if not device:
+            continue
+        key = device.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(device)
+    return cleaned
+
+
+def _split_device_names(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return _clean_device_names(value.split(","))
+
+
+def _device_csv(value: str | None) -> str | None:
+    devices = _split_device_names(value)
+    return ",".join(devices) if devices else None
+
+
+def _profile_devices(profile: PushoverProfile) -> list[str]:
+    stored = from_json(profile.device_names_json, [])
+    devices = [str(device) for device in stored] if isinstance(stored, list) else []
+    return _clean_device_names([*devices, *_split_device_names(profile.default_device)])
+
+
+def _profile_response(profile: PushoverProfile) -> PushoverProfileRead:
+    return PushoverProfileRead(
+        id=profile.id,
+        name=profile.name,
+        default_device=profile.default_device,
+        devices=_profile_devices(profile),
+        default_priority=profile.default_priority,
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+    )
+
+
+def _ensure_profile_exists(db: Session, profile_id: int | None) -> None:
+    if profile_id is not None and db.get(PushoverProfile, profile_id) is None:
+        raise HTTPException(status_code=422, detail="Pushover profile not found.")
 
 
 @app.get("/api/health")
@@ -114,8 +197,11 @@ def list_monitors(db: Db) -> list[MonitorRead]:
 
 @app.post("/api/monitors", response_model=MonitorRead, status_code=status.HTTP_201_CREATED)
 async def create_monitor(payload: MonitorCreate, db: Db) -> MonitorRead:
+    name = _clean_name(payload.name)
+    _ensure_unique_monitor_name(db, name)
+    _ensure_profile_exists(db, payload.pushover_profile_id)
     monitor = Monitor(
-        name=payload.name,
+        name=name,
         url=str(payload.url),
         mode=payload.mode,
         selector=payload.selector,
@@ -162,6 +248,11 @@ def update_monitor(monitor_id: int, payload: MonitorUpdate, db: Db) -> MonitorRe
     if monitor is None:
         raise HTTPException(status_code=404, detail="Monitor not found")
     updates = payload.model_dump(exclude_unset=True)
+    if "name" in updates and updates["name"] is not None:
+        updates["name"] = _clean_name(updates["name"])
+        _ensure_unique_monitor_name(db, updates["name"], exclude_id=monitor.id)
+    if "pushover_profile_id" in updates:
+        _ensure_profile_exists(db, updates["pushover_profile_id"])
     for field, value in updates.items():
         setattr(monitor, field, str(value) if field == "url" and value is not None else value)
     db.commit()
@@ -285,39 +376,88 @@ async def preview_select(payload: PreviewSelectRequest) -> PreviewSelectionRespo
 @app.get("/api/pushover-profiles", response_model=list[PushoverProfileRead])
 def list_pushover_profiles(db: Db) -> list[PushoverProfileRead]:
     profiles = db.scalars(select(PushoverProfile).order_by(PushoverProfile.name)).all()
-    return [
-        PushoverProfileRead(
-            id=profile.id,
-            name=profile.name,
-            default_device=profile.default_device,
-            default_priority=profile.default_priority,
-            created_at=profile.created_at,
-            updated_at=profile.updated_at,
-        )
-        for profile in profiles
-    ]
+    return [_profile_response(profile) for profile in profiles]
+
+
+@app.post("/api/pushover-profiles/validate", response_model=PushoverProfileValidateResponse)
+async def validate_pushover_profile(payload: PushoverProfileValidateRequest) -> PushoverProfileValidateResponse:
+    result = await validate_pushover_credentials(payload.user_key, payload.app_token)
+    if result.status != "valid":
+        raise HTTPException(status_code=400, detail=result.response or "Pushover credentials could not be validated.")
+    return PushoverProfileValidateResponse(status=result.status, devices=result.devices, response=result.response)
 
 
 @app.post("/api/pushover-profiles", response_model=PushoverProfileRead, status_code=status.HTTP_201_CREATED)
 def create_pushover_profile(payload: PushoverProfileCreate, db: Db) -> PushoverProfileRead:
+    name = _clean_name(payload.name)
+    _ensure_unique_profile_name(db, name)
+    selected_devices = _device_csv(payload.default_device)
+    devices = _clean_device_names([*payload.devices, *_split_device_names(selected_devices)])
     profile = PushoverProfile(
-        name=payload.name,
+        name=name,
         user_key_encrypted=encrypt_secret(payload.user_key),
         app_token_encrypted=encrypt_secret(payload.app_token),
-        default_device=payload.default_device,
+        default_device=selected_devices,
+        device_names_json=to_json(devices),
         default_priority=payload.default_priority,
     )
     db.add(profile)
     db.commit()
     db.refresh(profile)
-    return PushoverProfileRead(
-        id=profile.id,
-        name=profile.name,
-        default_device=profile.default_device,
-        default_priority=profile.default_priority,
-        created_at=profile.created_at,
-        updated_at=profile.updated_at,
-    )
+    return _profile_response(profile)
+
+
+@app.patch("/api/pushover-profiles/{profile_id}", response_model=PushoverProfileRead)
+def update_pushover_profile(profile_id: int, payload: PushoverProfileUpdate, db: Db) -> PushoverProfileRead:
+    profile = db.get(PushoverProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Pushover profile not found")
+    updates = payload.model_dump(exclude_unset=True)
+    if "name" in updates and updates["name"] is not None:
+        name = _clean_name(updates["name"])
+        _ensure_unique_profile_name(db, name, exclude_id=profile.id)
+        profile.name = name
+    if "default_device" in updates:
+        profile.default_device = _device_csv(updates["default_device"])
+    if "devices" in updates and updates["devices"] is not None:
+        selected_devices = _split_device_names(profile.default_device)
+        profile.device_names_json = to_json(_clean_device_names([*updates["devices"], *selected_devices]))
+    if "default_priority" in updates and updates["default_priority"] is not None:
+        profile.default_priority = updates["default_priority"]
+    db.commit()
+    db.refresh(profile)
+    return _profile_response(profile)
+
+
+@app.delete("/api/pushover-profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+def delete_pushover_profile(profile_id: int, db: Db) -> Response:
+    profile = db.get(PushoverProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Pushover profile not found")
+    monitors = db.scalars(select(Monitor).where(Monitor.pushover_profile_id == profile.id)).all()
+    for monitor in monitors:
+        monitor.pushover_profile_id = None
+    db.delete(profile)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/pushover-profiles/{profile_id}/refresh-devices", response_model=PushoverProfileRead)
+async def refresh_pushover_profile_devices(profile_id: int, db: Db) -> PushoverProfileRead:
+    profile = db.get(PushoverProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Pushover profile not found")
+    user_key = decrypt_secret(profile.user_key_encrypted)
+    app_token = decrypt_secret(profile.app_token_encrypted)
+    if not user_key or not app_token:
+        raise HTTPException(status_code=400, detail="Pushover credentials could not be decrypted.")
+    result = await validate_pushover_credentials(user_key, app_token)
+    if result.status != "valid":
+        raise HTTPException(status_code=400, detail=result.response or "Pushover credentials could not be validated.")
+    profile.device_names_json = to_json(_clean_device_names([*result.devices, *_split_device_names(profile.default_device)]))
+    db.commit()
+    db.refresh(profile)
+    return _profile_response(profile)
 
 
 @app.post("/api/pushover-profiles/{profile_id}/test")

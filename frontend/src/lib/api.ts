@@ -57,8 +57,18 @@ export const api = {
   previewSelect: (payload: Record<string, unknown>) =>
     request<PreviewSelection>("/api/preview/select-element", { method: "POST", body: JSON.stringify(payload) }),
   profiles: () => request<PushoverProfile[]>("/api/pushover-profiles"),
+  validateProfile: (payload: Record<string, unknown>) =>
+    request<{ status: string; devices: string[]; response: string }>("/api/pushover-profiles/validate", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
   createProfile: (payload: Record<string, unknown>) =>
     request<PushoverProfile>("/api/pushover-profiles", { method: "POST", body: JSON.stringify(payload) }),
+  updateProfile: (id: number, payload: Record<string, unknown>) =>
+    request<PushoverProfile>(`/api/pushover-profiles/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteProfile: (id: number) => request<void>(`/api/pushover-profiles/${id}`, { method: "DELETE" }),
+  refreshProfileDevices: (id: number) =>
+    request<PushoverProfile>(`/api/pushover-profiles/${id}/refresh-devices`, { method: "POST" }),
   testProfile: (id: number, payload: Record<string, unknown>) =>
     request<{ status: string; response: string }>(`/api/pushover-profiles/${id}/test`, {
       method: "POST",

@@ -37,6 +37,15 @@ def init_db() -> None:
                     "ALTER TABLE monitors ADD COLUMN render_wait_ms INTEGER NOT NULL DEFAULT 1500"
                 )
                 connection.commit()
+            profile_columns = {
+                row[1]
+                for row in connection.exec_driver_sql("PRAGMA table_info(pushover_profiles)").all()
+            }
+            if "device_names_json" not in profile_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE pushover_profiles ADD COLUMN device_names_json TEXT NOT NULL DEFAULT '[]'"
+                )
+                connection.commit()
 
 
 def get_db():
