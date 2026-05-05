@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import React, { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./lib/api";
-import type { Alert, AppSettings, CheckRun, Monitor, PreviewElement, PreviewLoad, PreviewSelection, PushoverProfile } from "./lib/types";
+import type { Alert, AppSettings, CheckRun, Monitor, PreviewElement, PreviewLoad, PreviewSelection, PushoverProfile, Rule } from "./lib/types";
 
 type View = "dashboard" | "new" | "settings" | "detail";
 
@@ -125,6 +125,43 @@ function uniqueDevices(values: string[]) {
   });
 }
 
+function splitPhraseDraft(value: string) {
+  const seen = new Set<string>();
+  return value
+    .split(/\r?\n/)
+    .map((phrase) => phrase.trim())
+    .filter((phrase) => {
+      const key = phrase.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function runDurationLabel(run: CheckRun) {
+  if (!run.finished_at) return "running";
+  const started = parseApiDate(run.started_at).getTime();
+  const finished = parseApiDate(run.finished_at).getTime();
+  if (Number.isNaN(started) || Number.isNaN(finished)) return "";
+  const seconds = Math.max(0, Math.ceil((finished - started) / 1000));
+  return seconds < 1 ? "<1s" : `${seconds}s`;
+}
+
+function nextCheckState(monitor: Monitor, now: number) {
+  if (!monitor.enabled) return { label: "Paused", progress: 0 };
+  if (!monitor.last_checked_at) return { label: "Due now", progress: 100 };
+  const lastCheck = parseApiDate(monitor.last_checked_at).getTime();
+  if (Number.isNaN(lastCheck)) return { label: "Unknown", progress: 0 };
+  const intervalMs = monitor.interval_seconds * 1000;
+  const nextCheck = lastCheck + intervalMs;
+  const remainingMs = nextCheck - now;
+  if (remainingMs <= 0) return { label: "Due now", progress: 100 };
+  return {
+    label: `Next check in ${durationLabel(Math.ceil(remainingMs / 1000))}`,
+    progress: Math.round((clamp(now - lastCheck, 0, intervalMs) / intervalMs) * 100)
+  };
+}
+
 function rectsOverlap(left: PreviewElement["rect"], right: PreviewElement["rect"]) {
   return !(
     left.x + left.width < right.x ||
@@ -198,6 +235,18 @@ function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
       {...props}
       className={classNames(
         "h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 shadow-sm transition placeholder:text-zinc-400",
+        props.className
+      )}
+    />
+  );
+}
+
+function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return (
+    <textarea
+      {...props}
+      className={classNames(
+        "min-h-24 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 shadow-sm transition placeholder:text-zinc-400",
         props.className
       )}
     />
@@ -285,6 +334,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
 function Dashboard({
   monitors,
   alerts,
+  profiles,
   busyId,
   now,
   onCreate,
@@ -296,6 +346,7 @@ function Dashboard({
 }: {
   monitors: Monitor[];
   alerts: Alert[];
+  profiles: PushoverProfile[];
   busyId: number | null;
   now: number;
   onCreate: () => void;
@@ -305,6 +356,8 @@ function Dashboard({
   onPauseResume: (monitor: Monitor) => void;
   onDelete: (id: number) => void;
 }) {
+  const profileNames = useMemo(() => new Map(profiles.map((profile) => [profile.id, profile.name])), [profiles]);
+
   if (monitors.length === 0) return <EmptyState onCreate={onCreate} />;
 
   return (
@@ -339,6 +392,9 @@ function Dashboard({
                   <span>{monitor.mode.replaceAll("_", " ")}</span>
                   <span>{durationLabel(monitor.interval_seconds)} interval</span>
                   <span>{(monitor.render_wait_ms / 1000).toFixed(1)}s wait</span>
+                  <span>
+                    {monitor.pushover_profile_id ? `Push: ${profileNames.get(monitor.pushover_profile_id) ?? "profile"}` : "Logs only"}
+                  </span>
                   <span>Last check {timeAgo(monitor.last_checked_at, now)}</span>
                   <span>Last alert {timeAgo(monitor.last_alerted_at, now)}</span>
                 </div>
@@ -679,9 +735,95 @@ function NewMonitorWizard({
   );
 }
 
+function RuleCard({
+  monitorId,
+  rule,
+  onSave
+}: {
+  monitorId: number;
+  rule: Rule;
+  onSave: (monitorId: number, ruleId: number, payload: Record<string, unknown>) => void;
+}) {
+  const initialPhrases = Array.isArray(rule.config.phrases)
+    ? rule.config.phrases.map((phrase) => String(phrase)).join("\n")
+    : "";
+  const initialHammingThreshold = Number(rule.config.hamming_threshold ?? 18);
+  const [enabled, setEnabled] = useState(rule.enabled);
+  const [phraseDraft, setPhraseDraft] = useState(initialPhrases);
+  const [hammingThreshold, setHammingThreshold] = useState(initialHammingThreshold);
+
+  useEffect(() => {
+    setEnabled(rule.enabled);
+    setPhraseDraft(initialPhrases);
+    setHammingThreshold(initialHammingThreshold);
+  }, [rule.id, rule.enabled, initialPhrases, initialHammingThreshold]);
+
+  const saveCommon = (config: Record<string, unknown>) => {
+    onSave(monitorId, rule.id, { enabled, config });
+  };
+
+  return (
+    <div className="min-w-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50 p-3">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <span className="min-w-0 break-words text-sm font-semibold text-zinc-900">{rule.type.replaceAll("_", " ")}</span>
+        <label className="flex items-center gap-2 text-xs font-medium text-zinc-600">
+          <input
+            type="checkbox"
+            className="h-4 w-4 accent-teal-700"
+            checked={enabled}
+            onChange={(event) => setEnabled(event.target.checked)}
+          />
+          Enabled
+        </label>
+      </div>
+
+      {rule.type === "positive_phrase_present" ? (
+        <div className="mt-3 grid gap-2">
+          <Field label="Positive phrases" hint="One phrase per line. Any new match can trigger an alert.">
+            <TextArea value={phraseDraft} onChange={(event) => setPhraseDraft(event.target.value)} />
+          </Field>
+          <Button
+            variant="secondary"
+            onClick={() => saveCommon({ phrases: splitPhraseDraft(phraseDraft) })}
+            disabled={splitPhraseDraft(phraseDraft).length === 0}
+          >
+            <Save className="h-4 w-4" />
+            Save rule
+          </Button>
+        </div>
+      ) : null}
+
+      {rule.type === "any_visual_change" ? (
+        <div className="mt-3 grid gap-2">
+          <Field label="Hamming threshold" hint="Lower is more sensitive. Higher ignores small visual shifts.">
+            <TextInput
+              type="number"
+              min={1}
+              max={64}
+              value={hammingThreshold}
+              onChange={(event) => setHammingThreshold(Number(event.target.value || 1))}
+            />
+          </Field>
+          <Button variant="secondary" onClick={() => saveCommon({ hamming_threshold: hammingThreshold })}>
+            <Save className="h-4 w-4" />
+            Save rule
+          </Button>
+        </div>
+      ) : null}
+
+      {rule.type !== "positive_phrase_present" && rule.type !== "any_visual_change" ? (
+        <pre className="mt-2 max-w-full overflow-auto whitespace-pre-wrap break-words text-xs text-zinc-600 scrollbar-thin">
+          {JSON.stringify(rule.config, null, 2)}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
+
 function MonitorDetail({
   monitor,
   runs,
+  profiles,
   busyId,
   now,
   onBack,
@@ -690,10 +832,13 @@ function MonitorDetail({
   onPauseResume,
   onRebaseline,
   onUpdateWait,
-  onUpdateInterval
+  onUpdateInterval,
+  onUpdateNotifications,
+  onUpdateRule
 }: {
   monitor: Monitor;
   runs: CheckRun[];
+  profiles: PushoverProfile[];
   busyId: number | null;
   now: number;
   onBack: () => void;
@@ -703,14 +848,24 @@ function MonitorDetail({
   onRebaseline: (id: number) => void;
   onUpdateWait: (id: number, renderWaitMs: number) => void;
   onUpdateInterval: (id: number, intervalSeconds: number) => void;
+  onUpdateNotifications: (id: number, payload: Record<string, unknown>) => void;
+  onUpdateRule: (monitorId: number, ruleId: number, payload: Record<string, unknown>) => void;
 }) {
   const baselineImage = monitor.baseline?.element_screenshot_url || monitor.baseline?.screenshot_url;
   const latestImage = monitor.latest_snapshot?.element_screenshot_url || monitor.latest_snapshot?.screenshot_url;
   const [intervalDraft, setIntervalDraft] = useState(monitor.interval_seconds);
+  const nextCheck = nextCheckState(monitor, now);
+  const shownRuns = runs.slice(0, 20);
+  const [showAllRuns, setShowAllRuns] = useState(false);
+  const visibleRuns = showAllRuns ? runs : shownRuns;
 
   useEffect(() => {
     setIntervalDraft(monitor.interval_seconds);
   }, [monitor.id, monitor.interval_seconds]);
+
+  useEffect(() => {
+    setShowAllRuns(false);
+  }, [monitor.id]);
 
   return (
     <div className="grid gap-5">
@@ -746,28 +901,81 @@ function MonitorDetail({
             </Button>
           </div>
         </div>
-        <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,280px)_minmax(0,240px)]">
-          <Field label="Check interval" hint={durationLabel(intervalDraft)}>
-            <div className="grid gap-2">
+        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)_minmax(0,1fr)]">
+          <div className="grid gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-3">
+            <Field label="Check interval" hint={durationLabel(intervalDraft)}>
               <DurationInputs value={intervalDraft} onChange={setIntervalDraft} />
-              <Button
-                variant="secondary"
-                onClick={() => onUpdateInterval(monitor.id, intervalDraft)}
-                disabled={intervalDraft === monitor.interval_seconds}
-              >
-                <Save className="h-4 w-4" />
-                Save interval
-              </Button>
+            </Field>
+            <Button
+              variant="secondary"
+              onClick={() => onUpdateInterval(monitor.id, intervalDraft)}
+              disabled={intervalDraft === monitor.interval_seconds}
+            >
+              <Save className="h-4 w-4" />
+              Save interval
+            </Button>
+            <div className="grid gap-1">
+              <div className="flex items-center justify-between text-xs font-medium text-zinc-500">
+                <span>{nextCheck.label}</span>
+                <span>{nextCheck.progress}%</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-zinc-200">
+                <div className="h-full rounded-full bg-teal-700 transition-all" style={{ width: `${nextCheck.progress}%` }} />
+              </div>
             </div>
-          </Field>
-          <Field label="After-load wait" hint="Raise this if the page shows a temporary busy/loading status before the final stock text.">
-            <Select value={monitor.render_wait_ms} onChange={(event) => onUpdateWait(monitor.id, Number(event.target.value))}>
-              <option value={1500}>1.5 seconds</option>
-              <option value={3000}>3 seconds</option>
-              <option value={5000}>5 seconds</option>
-              <option value={8000}>8 seconds</option>
-            </Select>
-          </Field>
+          </div>
+
+          <div className="grid gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-3">
+            <Field label="After-load wait" hint="Raise this if the page shows a temporary busy/loading status before the final stock text.">
+              <Select value={monitor.render_wait_ms} onChange={(event) => onUpdateWait(monitor.id, Number(event.target.value))}>
+                <option value={1500}>1.5 seconds</option>
+                <option value={3000}>3 seconds</option>
+                <option value={5000}>5 seconds</option>
+                <option value={8000}>8 seconds</option>
+              </Select>
+            </Field>
+          </div>
+
+          <div className="grid gap-3 rounded-md border border-zinc-200 bg-zinc-50 p-3">
+            <Field label="Pushover profile" help="Clear the profile when this monitor should only write local logs.">
+              <Select
+                value={monitor.pushover_profile_id ?? ""}
+                onChange={(event) =>
+                  onUpdateNotifications(monitor.id, {
+                    pushover_profile_id: event.target.value ? Number(event.target.value) : null
+                  })
+                }
+              >
+                <option value="">Logs only</option>
+                {profiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+              <Field label="Priority">
+                <Select
+                  value={monitor.priority}
+                  onChange={(event) => onUpdateNotifications(monitor.id, { priority: Number(event.target.value) })}
+                >
+                  <option value={0}>Normal alert</option>
+                  <option value={1}>High priority</option>
+                  <option value={-1}>Quiet notification</option>
+                </Select>
+              </Field>
+              <label className="flex min-h-10 items-center gap-2 text-sm font-medium text-zinc-700">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-teal-700"
+                  checked={monitor.pause_after_alert}
+                  onChange={(event) => onUpdateNotifications(monitor.id, { pause_after_alert: event.target.checked })}
+                />
+                Pause after alert
+              </label>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -793,15 +1001,7 @@ function MonitorDetail({
           <h3 className="mb-3 text-base font-semibold text-zinc-950">Rules</h3>
           <div className="grid min-w-0 gap-3">
             {monitor.rules.map((rule) => (
-              <div key={rule.id} className="min-w-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50 p-3">
-                <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-                  <span className="min-w-0 break-words text-sm font-semibold text-zinc-900">{rule.type.replaceAll("_", " ")}</span>
-                  <StatusChip status={rule.enabled ? "ready" : "paused"} />
-                </div>
-                <pre className="mt-2 max-w-full overflow-auto whitespace-pre-wrap break-words text-xs text-zinc-600 scrollbar-thin">
-                  {JSON.stringify(rule.config, null, 2)}
-                </pre>
-              </div>
+              <RuleCard key={rule.id} monitorId={monitor.id} rule={rule} onSave={onUpdateRule} />
             ))}
           </div>
         </div>
@@ -812,23 +1012,32 @@ function MonitorDetail({
             <h3 className="text-base font-semibold text-zinc-950">History</h3>
           </div>
           <div className="divide-y divide-zinc-200">
-            {runs.map((run) => (
-              <div key={run.id} className="grid gap-2 px-4 py-3 text-sm">
-                <div className="flex flex-wrap items-center gap-2">
+            {visibleRuns.map((run) => (
+              <div key={run.id} className="grid gap-1 px-4 py-2 text-sm">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <StatusChip status={run.status} />
                   <span className="font-medium text-zinc-900">Logged {timeAgo(run.started_at, now)}</span>
                   <span className="text-zinc-500">score {Math.round(run.change_score * 100)}%</span>
+                  <span className="text-zinc-500">{runDurationLabel(run)}</span>
                   {run.snapshot_id ? <span className="text-zinc-500">snapshot #{run.snapshot_id}</span> : null}
                 </div>
                 {run.triggered_rules.length ? (
-                  <pre className="overflow-auto rounded-md bg-zinc-50 p-2 text-xs text-zinc-700 scrollbar-thin">
-                    {JSON.stringify(run.triggered_rules, null, 2)}
-                  </pre>
+                  <details className="rounded-md bg-zinc-50 px-2 py-1 text-xs text-zinc-700">
+                    <summary className="cursor-pointer font-medium">{run.triggered_rules.length} triggered rule{run.triggered_rules.length === 1 ? "" : "s"}</summary>
+                    <pre className="mt-2 overflow-auto scrollbar-thin">{JSON.stringify(run.triggered_rules, null, 2)}</pre>
+                  </details>
                 ) : null}
                 {run.error_message ? <p className="text-red-700">{run.error_message}</p> : null}
               </div>
             ))}
             {runs.length === 0 ? <p className="px-4 py-5 text-sm text-zinc-500">No check runs yet.</p> : null}
+            {runs.length > 20 ? (
+              <div className="px-4 py-3">
+                <Button variant="secondary" onClick={() => setShowAllRuns((value) => !value)}>
+                  {showAllRuns ? "Show newest 20" : `Show all ${runs.length}`}
+                </Button>
+              </div>
+            ) : null}
           </div>
         </div>
       </section>
@@ -1304,7 +1513,7 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -1406,6 +1615,27 @@ export default function App() {
     }
   }
 
+  async function updateNotifications(id: number, payload: Record<string, unknown>) {
+    try {
+      const detail = await api.updateMonitor(id, payload);
+      setMonitorDetail(detail);
+      await refresh();
+      setToast("Notification settings updated.");
+    } catch (exc) {
+      setToast(exc instanceof Error ? exc.message : "Notification update failed");
+    }
+  }
+
+  async function updateRule(monitorId: number, ruleId: number, payload: Record<string, unknown>) {
+    try {
+      await api.updateRule(monitorId, ruleId, payload);
+      await loadMonitorDetail(monitorId);
+      setToast("Rule updated.");
+    } catch (exc) {
+      setToast(exc instanceof Error ? exc.message : "Rule update failed");
+    }
+  }
+
   async function testProfile(id: number) {
     try {
       const result = await api.testProfile(id, { title: "Change Monitor test", message: "Pushover is connected." });
@@ -1423,20 +1653,12 @@ export default function App() {
     };
   }, [monitors, alerts]);
 
-  const unconfiguredMonitorCount = useMemo(
-    () => monitors.filter((monitor) => monitor.enabled && !monitor.pushover_profile_id).length,
-    [monitors]
-  );
-
   const notificationWarning = useMemo(() => {
     if (profiles.length === 0) {
       return "Pushover is not configured. Alerts will be recorded locally but no push message can be sent. Configure it under Settings.";
     }
-    if (unconfiguredMonitorCount > 0) {
-      return `${unconfiguredMonitorCount} enabled monitor${unconfiguredMonitorCount === 1 ? "" : "s"} without a Pushover profile. Configure this under Settings.`;
-    }
     return null;
-  }, [profiles.length, unconfiguredMonitorCount]);
+  }, [profiles.length]);
 
   return (
     <div className="min-h-screen bg-[#f7f7f4] text-zinc-900">
@@ -1481,20 +1703,22 @@ export default function App() {
       </header>
 
       <main className="mx-auto grid max-w-7xl gap-5 px-4 py-5 lg:px-6">
-        <section className="grid gap-3 sm:grid-cols-3">
-          <div className="rounded-md border border-zinc-200 bg-white p-4 shadow-soft">
-            <p className="text-sm text-zinc-500">Enabled</p>
-            <p className="mt-1 text-2xl font-semibold text-zinc-950">{activeCounts.enabled}</p>
-          </div>
-          <div className="rounded-md border border-zinc-200 bg-white p-4 shadow-soft">
-            <p className="text-sm text-zinc-500">Alerts</p>
-            <p className="mt-1 text-2xl font-semibold text-zinc-950">{activeCounts.alerts}</p>
-          </div>
-          <div className="rounded-md border border-zinc-200 bg-white p-4 shadow-soft">
-            <p className="text-sm text-zinc-500">Failed</p>
-            <p className="mt-1 text-2xl font-semibold text-zinc-950">{activeCounts.failed}</p>
-          </div>
-        </section>
+        {!loading && view === "dashboard" ? (
+          <section className="hidden gap-3 sm:grid sm:grid-cols-3">
+            <div className="rounded-md border border-zinc-200 bg-white p-4 shadow-soft">
+              <p className="text-sm text-zinc-500">Enabled</p>
+              <p className="mt-1 text-2xl font-semibold text-zinc-950">{activeCounts.enabled}</p>
+            </div>
+            <div className="rounded-md border border-zinc-200 bg-white p-4 shadow-soft">
+              <p className="text-sm text-zinc-500">Alerts</p>
+              <p className="mt-1 text-2xl font-semibold text-zinc-950">{activeCounts.alerts}</p>
+            </div>
+            <div className="rounded-md border border-zinc-200 bg-white p-4 shadow-soft">
+              <p className="text-sm text-zinc-500">Failed</p>
+              <p className="mt-1 text-2xl font-semibold text-zinc-950">{activeCounts.failed}</p>
+            </div>
+          </section>
+        ) : null}
 
         {toast ? (
           <div className="flex items-start justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
@@ -1515,6 +1739,7 @@ export default function App() {
           <Dashboard
             monitors={monitors}
             alerts={alerts}
+            profiles={profiles}
             busyId={busyId}
             now={now}
             onCreate={() => setView("new")}
@@ -1546,6 +1771,7 @@ export default function App() {
           <MonitorDetail
             monitor={selectedMonitor}
             runs={runs}
+            profiles={profiles}
             busyId={busyId}
             now={now}
             onBack={() => setView("dashboard")}
@@ -1559,6 +1785,8 @@ export default function App() {
             onRebaseline={rebaseline}
             onUpdateWait={updateRenderWait}
             onUpdateInterval={updateInterval}
+            onUpdateNotifications={updateNotifications}
+            onUpdateRule={updateRule}
           />
         ) : null}
 

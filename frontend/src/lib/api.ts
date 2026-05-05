@@ -5,7 +5,8 @@ import type {
   Monitor,
   PreviewLoad,
   PreviewSelection,
-  PushoverProfile
+  PushoverProfile,
+  Rule
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -52,6 +53,8 @@ export const api = {
   resume: (id: number) => request<Monitor>(`/api/monitors/${id}/resume`, { method: "POST" }),
   rebaseline: (id: number) => request(`/api/monitors/${id}/rebaseline`, { method: "POST" }),
   runs: (id: number) => request<CheckRun[]>(`/api/monitors/${id}/runs`),
+  updateRule: (monitorId: number, ruleId: number, payload: Record<string, unknown>) =>
+    request<Rule>(`/api/monitors/${monitorId}/rules/${ruleId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   previewLoad: (payload: Record<string, unknown>) =>
     request<PreviewLoad>("/api/preview/load", { method: "POST", body: JSON.stringify(payload) }),
   previewSelect: (payload: Record<string, unknown>) =>

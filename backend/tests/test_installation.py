@@ -42,9 +42,12 @@ import os
 
 from fastapi.testclient import TestClient
 
+from app.database import create_session
 from app.database import init_db
 from app.main import app
+from app.models import Monitor, Rule
 from app.security import decrypt_secret, encrypt_secret
+from app.storage import to_json
 
 init_db()
 assert decrypt_secret(encrypt_secret("volume-secret")) == "volume-secret"
@@ -69,6 +72,25 @@ with TestClient(app) as client:
     assert duplicate_response.status_code == 409
     delete_response = client.delete(f"/api/pushover-profiles/{profile_response.json()['id']}")
     assert delete_response.status_code == 204
+    with create_session() as db:
+        monitor = Monitor(name="Rule smoke", url="https://example.com", mode="bad_state", status="ready")
+        db.add(monitor)
+        db.flush()
+        rule = Rule(
+            monitor_id=monitor.id,
+            type="positive_phrase_present",
+            config_json=to_json({"phrases": ["add to cart"]}),
+        )
+        db.add(rule)
+        db.commit()
+        monitor_id = monitor.id
+        rule_id = rule.id
+    rule_response = client.patch(
+        f"/api/monitors/{monitor_id}/rules/{rule_id}",
+        json={"config": {"phrases": ["buy now", "in stock"]}, "enabled": True},
+    )
+    assert rule_response.status_code == 200
+    assert rule_response.json()["config"]["phrases"] == ["buy now", "in stock"]
 
 
 async def browser_check():

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .browser import browser_service
 from .config import settings
 from .database import get_db, init_db
-from .models import Alert, CheckRun, Monitor, PushoverProfile, Snapshot
+from .models import Alert, CheckRun, Monitor, PushoverProfile, Rule, Snapshot, utc_now
 from .notifier import send_pushover, validate_pushover_credentials
 from .schemas import (
     AlertRead,
@@ -34,12 +34,14 @@ from .schemas import (
     PushoverProfileUpdate,
     PushoverProfileValidateRequest,
     PushoverProfileValidateResponse,
+    RuleRead,
+    RuleUpdate,
     SnapshotRead,
     TestAlertRequest,
 )
 from .scheduler import scheduler
 from .security import decrypt_secret, encrypt_secret
-from .serialize import serialize_alert, serialize_check_run, serialize_monitor, serialize_snapshot
+from .serialize import serialize_alert, serialize_check_run, serialize_monitor, serialize_rule, serialize_snapshot
 from .services import diff_snapshots, initialize_monitor, rebaseline_monitor, run_monitor_check
 from .storage import from_json, read_text_artifact, to_json
 
@@ -149,6 +151,53 @@ def _profile_response(profile: PushoverProfile) -> PushoverProfileRead:
 def _ensure_profile_exists(db: Session, profile_id: int | None) -> None:
     if profile_id is not None and db.get(PushoverProfile, profile_id) is None:
         raise HTTPException(status_code=422, detail="Pushover profile not found.")
+
+
+def _clean_phrases(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        raise HTTPException(status_code=422, detail="Phrases must be a list of text values.")
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        phrase = " ".join(str(value).split())
+        key = phrase.casefold()
+        if not phrase or key in seen:
+            continue
+        seen.add(key)
+        phrases.append(phrase)
+    if not phrases:
+        raise HTTPException(status_code=422, detail="At least one positive phrase is required.")
+    return phrases[:50]
+
+
+def _clean_rule_config(rule_type: str, config: dict[str, Any]) -> dict[str, Any]:
+    if rule_type == "positive_phrase_present":
+        return {"phrases": _clean_phrases(config.get("phrases", []))}
+    if rule_type == "any_visual_change":
+        try:
+            threshold = int(config.get("hamming_threshold", 18))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="Hamming threshold must be a number.") from exc
+        if threshold < 1 or threshold > 64:
+            raise HTTPException(status_code=422, detail="Hamming threshold must be between 1 and 64.")
+        return {"hamming_threshold": threshold}
+    if rule_type == "any_text_change":
+        try:
+            threshold = float(config.get("threshold", 0.12))
+            minimum_changed_characters = int(config.get("minimum_changed_characters", 8))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="Text change rule values are invalid.") from exc
+        if threshold < 0 or threshold > 1:
+            raise HTTPException(status_code=422, detail="Text threshold must be between 0 and 1.")
+        if minimum_changed_characters < 1:
+            raise HTTPException(status_code=422, detail="Minimum changed characters must be at least 1.")
+        return {"threshold": threshold, "minimum_changed_characters": minimum_changed_characters}
+    if rule_type == "bad_text_absent":
+        bad_text = " ".join(str(config.get("bad_text", "")).split())
+        if not bad_text:
+            raise HTTPException(status_code=422, detail="Bad text is required.")
+        return {"bad_text": bad_text[:240]}
+    return config
 
 
 @app.get("/api/health")
@@ -315,6 +364,22 @@ def monitor_runs(monitor_id: int, db: Db, limit: int = Query(default=50, ge=1, l
         select(CheckRun).where(CheckRun.monitor_id == monitor_id).order_by(desc(CheckRun.started_at)).limit(limit)
     ).all()
     return [serialize_check_run(run) for run in runs]
+
+
+@app.patch("/api/monitors/{monitor_id}/rules/{rule_id}", response_model=RuleRead)
+def update_monitor_rule(monitor_id: int, rule_id: int, payload: RuleUpdate, db: Db) -> RuleRead:
+    rule = db.get(Rule, rule_id)
+    if rule is None or rule.monitor_id != monitor_id:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    updates = payload.model_dump(exclude_unset=True)
+    if "enabled" in updates and updates["enabled"] is not None:
+        rule.enabled = updates["enabled"]
+    if "config" in updates and updates["config"] is not None:
+        rule.config_json = to_json(_clean_rule_config(rule.type, updates["config"]))
+    rule.updated_at = utc_now()
+    db.commit()
+    db.refresh(rule)
+    return serialize_rule(rule)
 
 
 @app.get("/api/monitors/{monitor_id}/snapshots/{snapshot_id}", response_model=SnapshotRead)

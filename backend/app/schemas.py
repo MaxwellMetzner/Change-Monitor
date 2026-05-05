@@ -58,6 +58,11 @@ class RuleRead(BaseModel):
     updated_at: datetime
 
 
+class RuleUpdate(BaseModel):
+    config: dict[str, Any] | None = None
+    enabled: bool | None = None
+
+
 class SnapshotRead(BaseModel):
     id: int
     monitor_id: int
