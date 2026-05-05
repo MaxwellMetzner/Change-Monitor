@@ -84,6 +84,11 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/health", include_in_schema=False)
+def container_health() -> dict[str, str]:
+    return health()
+
+
 @app.get("/api/monitors", response_model=list[MonitorRead])
 def list_monitors(db: Db) -> list[MonitorRead]:
     monitors = db.scalars(select(Monitor).order_by(desc(Monitor.created_at))).all()

@@ -42,14 +42,68 @@ Open `http://localhost:5173`. The Vite server proxies `/api` to `http://127.0.0.
 
 ## Docker
 
+### Local Development Image
+
 ```powershell
-copy .env.example .env
-docker compose up --build
+docker compose -f docker-compose.dev.yml up -d --build
 ```
 
-The app will be available at `http://localhost:8080`.
+The dev app will be available at `http://localhost:8080`.
 
-Persistent data is written to `./data`:
+### Production From Docker Hub
+
+The default [docker-compose.yml](./docker-compose.yml) is set up for Portainer or a server pulling a prebuilt image:
+
+```yaml
+image: max1234565/changemonitor:0.1.0
+```
+
+Deploy or update on the server with:
+
+```powershell
+docker compose pull
+docker compose up -d
+```
+
+The production compose maps the app to `http://10.0.0.201:8085` and stores data at:
+
+```text
+/opt/homelab/volumes/change-monitor/data
+```
+
+The container runs as UID `1000`, so make sure the host data directory is writable by that UID:
+
+```bash
+sudo mkdir -p /opt/homelab/volumes/change-monitor/data
+sudo chown -R 1000:1000 /opt/homelab/volumes/change-monitor/data
+```
+
+### Publish To Docker Hub
+
+Manual single-architecture push:
+
+```powershell
+docker login
+docker build -t max1234565/changemonitor:latest .
+docker tag max1234565/changemonitor:latest max1234565/changemonitor:0.1.0
+docker push max1234565/changemonitor:latest
+docker push max1234565/changemonitor:0.1.0
+```
+
+Multi-architecture push for `linux/amd64` and `linux/arm64`:
+
+```powershell
+docker buildx create --use
+docker buildx build `
+  --platform linux/amd64,linux/arm64 `
+  -t max1234565/changemonitor:latest `
+  -t max1234565/changemonitor:0.1.0 `
+  --push .
+```
+
+For rollback-friendly server deployments, prefer a pinned tag such as `max1234565/changemonitor:0.1.0` over `latest`.
+
+For the dev compose file, persistent data is written to `./data`:
 
 - `data/db`
 - `data/screenshots`
@@ -85,4 +139,3 @@ Authentication is intentionally left to a reverse proxy for this MVP. Put the se
 - The app does not bypass CAPTCHAs, rotate proxies, automate purchasing, or perform checkout.
 - Use conservative intervals. The default restock-oriented path uses 3 minutes with jitter.
 - Screenshots can contain private page content. Keep the data volume protected and delete monitors you no longer need.
-

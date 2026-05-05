@@ -1,16 +1,22 @@
 services:
   watcher-app:
-    image: max1234565/changemonitor:0.1.0
-    container_name: change-monitor
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: change-monitor:dev
+    container_name: change-monitor-dev
     restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATA_DIR: /data
-      APP_BASE_URL: http://10.0.0.201:8085
+      APP_BASE_URL: http://localhost:8080
       TZ: America/New_York
     ports:
-      - "8085:8000"
+      - "8080:8000"
     volumes:
-      - /opt/homelab/volumes/change-monitor/data:/data
+      - ./data:/data
     healthcheck:
       test:
         [
@@ -23,4 +29,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-
