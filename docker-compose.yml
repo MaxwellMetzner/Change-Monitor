@@ -1,0 +1,15 @@
+services:
+  watcher-app:
+    build: .
+    container_name: change-monitor
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /data
+      APP_BASE_URL: http://localhost:8080
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./data:/data
