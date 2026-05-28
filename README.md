@@ -2,6 +2,13 @@
 
 A self-hosted web app for monitoring rendered web pages and sending Pushover alerts when meaningful changes appear. The app is aimed at retail/restock monitoring where the current state is known to be bad, such as "Out of Stock", but the future good state is unknown.
 
+## Screenshots
+
+![Dashboard](./dashboard.jpg)
+
+
+![Item Monitor](./monitor.jpg)
+
 ## What Is Implemented
 
 - FastAPI backend with SQLite persistence.

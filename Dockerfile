@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS frontend-build
+FROM node:22-trixie-slim AS frontend-build
 
 WORKDIR /app/frontend
 
@@ -8,7 +8,7 @@ RUN npm ci
 COPY frontend ./
 RUN npm run build
 
-FROM python:3.11-slim-bookworm AS runtime
+FROM python:3.11-slim-trixie AS runtime
 
 LABEL org.opencontainers.image.title="Change Monitor" \
       org.opencontainers.image.description="Web page and element change monitor with Pushover notifications" \
@@ -23,10 +23,21 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-COPY backend/requirements.txt /app/backend/requirements.txt
-RUN python -m pip install --no-cache-dir -r /app/backend/requirements.txt
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN python -m playwright install --with-deps chromium
+COPY backend/requirements.txt /app/backend/requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade \
+        pip==26.1.1 \
+        setuptools==82.0.1 \
+        wheel==0.47.0 \
+    && python -m pip install --no-cache-dir -r /app/backend/requirements.txt
+
+RUN python -m playwright install --with-deps chromium \
+    && apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY backend /app/backend
 COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
